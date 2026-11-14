@@ -22,7 +22,6 @@ DEFAULT_OPTIONS: Final = {
 # role -> (entity domain, ESPHome entity name). The firmware in esphome/ uses these names.
 ROLES: Final = {
     "mode": ("select", "Mode"),
-    "panel": ("select", "Panel type"),
     "open": ("button", "Open"),
     "reject": ("button", "Reject"),
     "release": ("button", "Release line"),

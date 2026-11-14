@@ -19,8 +19,10 @@ substitutions:
   pin_led_blue: D4
   pin_call_detect: D5
   pin_btn_accept: D6
-  # 5 V relay modules are usually active-low
-  relays_inverted: 'true'
+  # Relay module polarity. CHECK IT before connecting to the line (see README → «Перевірка реле»):
+  # with the board powered and idle, Line+/Line− must read ≈ 50 Ω (your handset / resistor), not an open circuit.
+  # Open circuit at idle → the relays are energized → flip this value.
+  relays_inverted: 'false'
 
 ########### End user configuration ###########
 
@@ -30,11 +32,12 @@ esphome:
   comment: "Smart Domofon (coordinate intercom line)"
   project:
     name: heartpolik.smart-domofon
-    version: "2.1.0"
+    version: "2.2.0"
   on_boot:
     priority: -100
     then:
       - lambda: id(incoming_call).publish_state(false);
+      - script.execute: apply_idle
       - script.execute: update_leds
 
 esp8266:
@@ -118,61 +121,63 @@ script:
     then:
       - lambda: id(lockout_until) = millis() + (uint32_t)(id(lockout_s).state * 1000);
 
-  # Відчинити. Залежить від «Тип панелі»:
-  #  • Класичний (Цифрал/Візит, як в оригінальному smart-domofon): зняти → імпульс «відчинити» (розрив) → покласти.
-  #  • СтройМастер: «зняти → покласти» = відчинити; після цього панель тримає лінію, доки трубку не знімуть
-  #    і не покладуть ще раз → зняти → покласти (двері) → пауза → зняти → покласти (відпустити лінію).
+  # Стан лінії в спокої. «Завжди скидати» = обидва реле ввімкнені → лінія в розриві
+  # (панель бачить «немає абонента» і сама дає помилку). Інші режими = реле вимкнені → 50 Ом (трубка покладена).
+  - id: apply_idle
+    then:
+      - lambda: |-
+          const bool brk = id(mode).current_option().str() == "Завжди скидати";
+          if (brk) { id(relay_answer).turn_on(); id(relay_open).turn_on(); }
+          else { id(relay_open).turn_off(); id(relay_answer).turn_off(); }
+
+  # Відчинити: зняти (330 Ом) → «Answer delay» → розрив лінії на «Open pulse» → покласти (50 Ом).
+  # Перевірено на СтройМастер: 100 мс / 2000 мс. Класичні значення smart-domofon: 1500 мс / 600 мс.
   - id: seq_accept
     mode: single
     then:
       - lambda: id(acted) = true;
+      - output.turn_off: relay_open
       - output.turn_on: relay_answer
       - delay: !lambda "return (uint32_t) id(answer_ms).state;"
-      - if:
-          condition:
-            lambda: 'return id(panel_profile).current_option().str() == "СтройМастер";'
-          then:
-            - output.turn_off: relay_answer
-            - script.execute: { id: log_event, type: opened, text: "Відчинено" }
-            - delay: !lambda "return (uint32_t) id(release_gap_ms).state;"
-            - output.turn_on: relay_answer
-            - delay: !lambda "return (uint32_t) id(answer_ms).state;"
-            - output.turn_off: relay_answer
-            - script.execute: { id: log_event, type: released, text: "Лінію відпущено" }
-          else:
-            - output.turn_on: relay_open
-            - delay: !lambda "return (uint32_t) id(open_ms).state;"
-            - output.turn_off: relay_open
-            - delay: 500ms
-            - output.turn_off: relay_answer
-            - script.execute: { id: log_event, type: opened, text: "Відчинено" }
+      - output.turn_on: relay_open
+      - delay: !lambda "return (uint32_t) id(open_ms).state;"
+      - output.turn_off: relay_open
+      - delay: 500ms
+      - output.turn_off: relay_answer
+      - script.execute: apply_idle
+      - script.execute: { id: log_event, type: opened, text: "Відчинено" }
       - script.execute: start_lockout
       - script.execute: update_leds
 
-  # Скинути. Класичний: зняти → покласти. СтройМастер: будь-яке «зняти → покласти» відчиняє двері,
-  # тому реле не чіпаємо — не відповідаємо, панель сама завершує виклик.
+  # Скинути: зняти → покласти.
   - id: seq_reject
     mode: single
     then:
       - lambda: id(acted) = true;
       - if:
           condition:
-            lambda: 'return id(panel_profile).current_option().str() != "СтройМастер";'
+            lambda: 'return id(mode).current_option().str() == "Завжди скидати";'
           then:
+            - script.execute: { id: log_event, type: rejected, text: "Скинуто (лінія в розриві)" }
+          else:
+            - output.turn_off: relay_open
             - output.turn_on: relay_answer
-            - delay: !lambda "return (uint32_t) id(answer_ms).state;"
+            - delay: !lambda "return (uint32_t) id(reject_ms).state;"
             - output.turn_off: relay_answer
+            - script.execute: apply_idle
+            - script.execute: { id: log_event, type: rejected, text: "Скинуто" }
       - script.execute: start_lockout
-      - script.execute: { id: log_event, type: rejected, text: "Скинуто" }
       - script.execute: update_leds
 
-  # Ручне відновлення, якщо лінія «зависла»: зняти → покласти. ⚠️ Під час дзвінка це відчинить двері.
+  # Ручне «зняти → покласти» (якщо панель «зависла» з піднятою трубкою).
   - id: seq_release
     mode: single
     then:
+      - output.turn_off: relay_open
       - output.turn_on: relay_answer
-      - delay: !lambda "return (uint32_t) id(answer_ms).state;"
+      - delay: !lambda "return (uint32_t) id(reject_ms).state;"
       - output.turn_off: relay_answer
+      - script.execute: apply_idle
       - script.execute: { id: log_event, type: released, text: "Лінію відпущено вручну" }
       - script.execute: update_leds
 
@@ -260,7 +265,7 @@ interval:
           const bool locked = relays || (int32_t)(id(lockout_until) - now) > 0;
           if (raw) id(last_activity) = now;
           if (!id(in_call)) {
-            // 🛠 2026-11-14: після дії панель ще ~8 с тримає сигнал на лінії (тон відчинення) — це не новий
+            // Після дії панель ще ~8 с тримає сигнал на лінії (тон відчинення) — це не новий
             // дзвінок. Новий дзвінок можливий лише після ≥ 2 с тиші.
             if (id(need_quiet)) {
               if (!raw && now - id(last_activity) >= 2000) id(need_quiet) = false;
@@ -276,7 +281,7 @@ interval:
             }
           } else {
             // 7/8: кінець дзвінка — тиша ≥ call_end_s, і не під час роботи реле/блокування.
-            // 🛠 2026-11-13: після дії дзвінок закінчується одразу після блокування — інакше повторний
+            // Після дії дзвінок закінчується одразу після блокування — інакше повторний
             // набір у межах блокування+тиші вважався тим самим дзвінком і нова дія не виконувалась.
             if (!locked && (id(acted) || now - id(last_activity) > (uint32_t)(id(call_end_s).state * 1000))) {
               id(in_call) = false;
@@ -297,17 +302,6 @@ event:
 
 select:
   - platform: template
-    id: panel_profile
-    name: "Panel type"
-    icon: mdi:door-sliding-lock
-    entity_category: config
-    options:
-      - Класичний
-      - СтройМастер
-    initial_option: Класичний
-    optimistic: true
-    restore_value: true
-  - platform: template
     id: mode
     name: "Mode"
     icon: mdi:door
@@ -321,6 +315,11 @@ select:
     restore_value: true
     on_value:
       - script.execute: { id: log_event, type: manual, text: !lambda 'return "Режим: " + x;' }
+      - if:
+          condition:
+            lambda: "return !(id(seq_accept).is_running() || id(seq_reject).is_running() || id(seq_release).is_running());"
+          then:
+            - script.execute: apply_idle
       - script.execute: update_leds
 
 number:
@@ -368,19 +367,7 @@ number:
     min_value: 100
     max_value: 5000
     step: 100
-    initial_value: 1500
-    optimistic: true
-    restore_value: true
-    entity_category: config
-  - platform: template
-    id: release_gap_ms
-    name: "Release gap"
-    icon: mdi:timer-pause-outline
-    unit_of_measurement: ms
-    min_value: 200
-    max_value: 10000
-    step: 100
-    initial_value: 2000
+    initial_value: 100
     optimistic: true
     restore_value: true
     entity_category: config
@@ -392,7 +379,20 @@ number:
     min_value: 100
     max_value: 3000
     step: 100
-    initial_value: 600
+    initial_value: 2000
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  # Скільки тримати «трубку знятою» при скиданні (занадто короткий імпульс панель не помічає)
+  - platform: template
+    id: reject_ms
+    name: "Reject hold"
+    icon: mdi:phone-hangup
+    unit_of_measurement: ms
+    min_value: 100
+    max_value: 5000
+    step: 100
+    initial_value: 1500
     optimistic: true
     restore_value: true
     entity_category: config
