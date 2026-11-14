@@ -1,0 +1,114 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Intercom",
+        "description": "Select the ESPHome intercom device (smart-domofon firmware from this repository).",
+        "data": {
+          "device_id": "Device"
+        }
+      }
+    },
+    "error": {
+      "missing_entities": "The device is missing required entities: {missing}. Check the firmware."
+    },
+    "abort": {
+      "already_configured": "This intercom is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Notifications",
+        "data": {
+          "notify_services": "Notify services (notify.mobile_app_…)",
+          "actionable": "“Open” / “Reject” buttons in the notification",
+          "require_auth": "Require Face ID / unlock for “Open”",
+          "notify_outcome": "Notify the outcome (opened / rejected / missed)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "calls_today": {
+        "name": "Calls today"
+      },
+      "last_call": {
+        "name": "Last call",
+        "state_attributes": {
+          "outcome": {
+            "name": "Outcome",
+            "state": {
+              "ringing": "Ringing",
+              "opened": "Opened",
+              "rejected": "Rejected",
+              "missed": "Missed"
+            }
+          }
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "entry_required": {
+      "message": "Specify config_entry_id: several (or no) intercoms are configured."
+    }
+  },
+  "selector": {
+    "mode": {
+      "options": {
+        "normal": "Normal",
+        "open_once": "Open once",
+        "always_open": "Always open",
+        "always_reject": "Always reject"
+      }
+    }
+  },
+  "services": {
+    "open": {
+      "name": "Open",
+      "description": "Answer and open the door.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Intercom",
+          "description": "Needed when several intercoms are configured."
+        }
+      }
+    },
+    "reject": {
+      "name": "Reject",
+      "description": "Reject the current call.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Intercom",
+          "description": "Needed when several intercoms are configured."
+        }
+      }
+    },
+    "release": {
+      "name": "Release line",
+      "description": "Pick up and hang up when the panel hangs. During a call this may open the door.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Intercom",
+          "description": "Needed when several intercoms are configured."
+        }
+      }
+    },
+    "set_mode": {
+      "name": "Set mode",
+      "description": "Change the intercom mode.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Intercom",
+          "description": "Needed when several intercoms are configured."
+        },
+        "mode": {
+          "name": "Mode",
+          "description": "New mode."
+        }
+      }
+    }
+  }
+}

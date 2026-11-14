@@ -1,0 +1,552 @@
+# Smart Domofon — ESPHome firmware for coordinate (two-wire) apartment intercom lines.
+# Based on https://github.com/Anonym-tsk/smart-domofon (GPL-3.0), logic rewritten (v2).
+# Home Assistant integration + Lovelace card: see README.md in this repository.
+#
+# Secrets (put them into your ESPHome secrets.yaml):
+#   wifi_ssid, wifi_password, ap_password, api_encryption_key, ota_password
+
+############# User configuration #############
+
+substitutions:
+  device_name: domofon
+  friendly_name: "Domofon"
+  # NodeMCU v3 board
+  board: nodemcuv2
+  pin_relay_answer: D0
+  pin_relay_open: D1
+  pin_led_red: D2
+  pin_led_green: D3
+  pin_led_blue: D4
+  pin_call_detect: D5
+  pin_btn_accept: D6
+  # 5 V relay modules are usually active-low
+  relays_inverted: 'true'
+
+########### End user configuration ###########
+
+esphome:
+  name: $device_name
+  friendly_name: $friendly_name
+  comment: "Smart Domofon (coordinate intercom line)"
+  project:
+    name: heartpolik.smart-domofon
+    version: "2.1.0"
+  on_boot:
+    priority: -100
+    then:
+      - lambda: id(incoming_call).publish_state(false);
+      - script.execute: update_leds
+
+esp8266:
+  board: $board
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: on
+  ap:
+    ssid: "Domofon Fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+logger:
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s
+  actions:
+    # Сумісність зі старими викликами з HA
+    - action: accept_call
+      then:
+        - script.execute: request_accept
+    - action: reject_call
+      then:
+        - script.execute: request_reject
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Логіка v2 (2026-11-12). Виправлення відносно оригінального smart-domofon:
+#  6  дзвінок визнається лише якщо сигнал на лінії тримається ≥ «Мін. тривалість сигналу»;
+#  7  одна дія на один дзвінок; кінець дзвінка — після паузи «Кінець дзвінка» (за замовч. 6 с);
+#  8  під час роботи реле і «Блокування після дії» лінія ігнорується (без самозапуску);
+#  9  режим — один select із збереженням після перезавантаження;
+#  10 кнопка: коротко — «відчинити один раз» вкл/вимк, довго — «Звичайний»; без перебору по колу;
+#  11 повторні команди під час роботи реле не губляться мовчки — подія «busy» + текст;
+#  12 сенсор дзвінка без device_class lock.
+# ─────────────────────────────────────────────────────────────────────────────
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+debug:
+  update_interval: 60s
+
+globals:
+  - { id: in_call, type: bool, initial_value: "false" }
+  - { id: acted, type: bool, initial_value: "false" }        # у цьому дзвінку вже була дія
+  - { id: raw_since, type: uint32_t, initial_value: "0" }    # коли сигнал лінії з'явився (0 = немає)
+  - { id: last_activity, type: uint32_t, initial_value: "0" }
+  - { id: call_started, type: uint32_t, initial_value: "0" }
+  - { id: lockout_until, type: uint32_t, initial_value: "0" }
+  - { id: bursts, type: uint32_t, initial_value: "0" }       # посилок сигналу в поточному дзвінку
+  - { id: need_quiet, type: bool, initial_value: "false" }   # після дії: новий дзвінок лише після тиші на лінії
+
+script:
+  # Записати подію в текстовий сенсор (з часом) і в event-сутність
+  - id: log_event
+    mode: queued
+    parameters:
+      type: string
+      text: string
+    then:
+      - lambda: |-
+          auto t = id(ha_time).now();
+          std::string ts = t.is_valid() ? t.strftime("%H:%M:%S") : "--:--:--";
+          id(last_event).publish_state(ts + " " + text);
+          ESP_LOGI("domofon", "%s", text.c_str());
+      - event.trigger:
+          id: domofon_event
+          event_type: !lambda "return type;"
+
+  - id: start_lockout
+    then:
+      - lambda: id(lockout_until) = millis() + (uint32_t)(id(lockout_s).state * 1000);
+
+  # Відчинити. Залежить від «Тип панелі»:
+  #  • Класичний (Цифрал/Візит, як в оригінальному smart-domofon): зняти → імпульс «відчинити» (розрив) → покласти.
+  #  • СтройМастер: «зняти → покласти» = відчинити; після цього панель тримає лінію, доки трубку не знімуть
+  #    і не покладуть ще раз → зняти → покласти (двері) → пауза → зняти → покласти (відпустити лінію).
+  - id: seq_accept
+    mode: single
+    then:
+      - lambda: id(acted) = true;
+      - output.turn_on: relay_answer
+      - delay: !lambda "return (uint32_t) id(answer_ms).state;"
+      - if:
+          condition:
+            lambda: 'return id(panel_profile).current_option().str() == "СтройМастер";'
+          then:
+            - output.turn_off: relay_answer
+            - script.execute: { id: log_event, type: opened, text: "Відчинено" }
+            - delay: !lambda "return (uint32_t) id(release_gap_ms).state;"
+            - output.turn_on: relay_answer
+            - delay: !lambda "return (uint32_t) id(answer_ms).state;"
+            - output.turn_off: relay_answer
+            - script.execute: { id: log_event, type: released, text: "Лінію відпущено" }
+          else:
+            - output.turn_on: relay_open
+            - delay: !lambda "return (uint32_t) id(open_ms).state;"
+            - output.turn_off: relay_open
+            - delay: 500ms
+            - output.turn_off: relay_answer
+            - script.execute: { id: log_event, type: opened, text: "Відчинено" }
+      - script.execute: start_lockout
+      - script.execute: update_leds
+
+  # Скинути. Класичний: зняти → покласти. СтройМастер: будь-яке «зняти → покласти» відчиняє двері,
+  # тому реле не чіпаємо — не відповідаємо, панель сама завершує виклик.
+  - id: seq_reject
+    mode: single
+    then:
+      - lambda: id(acted) = true;
+      - if:
+          condition:
+            lambda: 'return id(panel_profile).current_option().str() != "СтройМастер";'
+          then:
+            - output.turn_on: relay_answer
+            - delay: !lambda "return (uint32_t) id(answer_ms).state;"
+            - output.turn_off: relay_answer
+      - script.execute: start_lockout
+      - script.execute: { id: log_event, type: rejected, text: "Скинуто" }
+      - script.execute: update_leds
+
+  # Ручне відновлення, якщо лінія «зависла»: зняти → покласти. ⚠️ Під час дзвінка це відчинить двері.
+  - id: seq_release
+    mode: single
+    then:
+      - output.turn_on: relay_answer
+      - delay: !lambda "return (uint32_t) id(answer_ms).state;"
+      - output.turn_off: relay_answer
+      - script.execute: { id: log_event, type: released, text: "Лінію відпущено вручну" }
+      - script.execute: update_leds
+
+  - id: request_accept
+    then:
+      - if:
+          condition:
+            lambda: "return id(seq_accept).is_running() || id(seq_reject).is_running() || id(seq_release).is_running();"
+          then:
+            - script.execute: { id: log_event, type: busy, text: "Команду «відчинити» пропущено: реле вже працюють" }
+          else:
+            - if:
+                condition:
+                  lambda: "return !id(in_call);"
+                then:
+                  - script.execute: { id: log_event, type: manual, text: "Відчинити без дзвінка (ручна команда)" }
+            - script.execute: seq_accept
+
+  - id: request_reject
+    then:
+      - if:
+          condition:
+            lambda: "return id(seq_accept).is_running() || id(seq_reject).is_running() || id(seq_release).is_running();"
+          then:
+            - script.execute: { id: log_event, type: busy, text: "Команду «скинути» пропущено: реле вже працюють" }
+          else:
+            - script.execute: seq_reject
+
+  # Що робити на початку дзвінка — рівно один раз за дзвінок
+  - id: on_call_start
+    then:
+      - script.execute: { id: log_event, type: ring, text: !lambda 'return "Дзвінок (режим: " + id(mode).current_option().str() + ")";' }
+      - lambda: |-
+          std::string m = id(mode).current_option().str();
+          if (m == "Завжди скидати") id(request_reject).execute();
+          else if (m == "Завжди відчиняти") id(request_accept).execute();
+          else if (m == "Відчинити один раз") {
+            id(request_accept).execute();
+            auto call = id(mode).make_call(); call.set_option("Звичайний"); call.perform();
+          }
+      - script.execute: update_leds
+
+  - id: on_call_end
+    then:
+      - lambda: |-
+          uint32_t dur = millis() - id(call_started);
+          id(last_call_duration).publish_state(dur / 1000.0f);
+          id(last_call_bursts).publish_state(id(bursts));
+      - if:
+          condition:
+            lambda: "return !id(acted);"
+          then:
+            - script.execute: { id: log_event, type: missed, text: !lambda 'return "Дзвінок без дії (" + to_string((int) id(last_call_duration).state) + " с)";' }
+      - script.execute: update_leds
+
+  # Світлодіоди: дзвінок без дії — блимає червоним; режими — як раніше
+  - id: update_leds
+    mode: restart
+    then:
+      - lambda: |-
+          std::string m = id(mode).current_option().str();
+          auto call = id(rgb_led).make_call();
+          if (id(in_call) && !id(acted) && m == "Звичайний") {
+            call.set_state(true); call.set_effect("Blink Red");
+          } else if (m == "Відчинити один раз") {
+            call.set_state(true); call.set_effect("Blink Green");
+          } else if (m == "Завжди відчиняти") {
+            call.set_state(true); call.set_effect("None"); call.set_rgb(0, 1, 0); call.set_brightness(0.5);
+          } else if (m == "Завжди скидати") {
+            call.set_state(true); call.set_effect("None"); call.set_rgb(1, 0, 0); call.set_brightness(0.5);
+          } else {
+            call.set_state(false); call.set_effect("None");
+          }
+          call.set_transition_length(100);
+          call.perform();
+
+# Детектор дзвінка: опитування кожні 20 мс
+interval:
+  - interval: 20ms
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          const bool raw = id(line_signal).state;
+          const bool relays = id(seq_accept).is_running() || id(seq_reject).is_running() || id(seq_release).is_running();
+          const bool locked = relays || (int32_t)(id(lockout_until) - now) > 0;
+          if (raw) id(last_activity) = now;
+          if (!id(in_call)) {
+            // 🛠 2026-11-14: після дії панель ще ~8 с тримає сигнал на лінії (тон відчинення) — це не новий
+            // дзвінок. Новий дзвінок можливий лише після ≥ 2 с тиші.
+            if (id(need_quiet)) {
+              if (!raw && now - id(last_activity) >= 2000) id(need_quiet) = false;
+              else return;
+            }
+            // 6: початок дзвінка — сигнал безперервно ≥ min_signal_ms і немає блокування
+            if (raw && !locked && id(raw_since) != 0 &&
+                now - id(raw_since) >= (uint32_t) id(min_signal_ms).state) {
+              id(in_call) = true; id(acted) = false;
+              id(call_started) = now;
+              id(incoming_call).publish_state(true);
+              id(on_call_start).execute();
+            }
+          } else {
+            // 7/8: кінець дзвінка — тиша ≥ call_end_s, і не під час роботи реле/блокування.
+            // 🛠 2026-11-13: після дії дзвінок закінчується одразу після блокування — інакше повторний
+            // набір у межах блокування+тиші вважався тим самим дзвінком і нова дія не виконувалась.
+            if (!locked && (id(acted) || now - id(last_activity) > (uint32_t)(id(call_end_s).state * 1000))) {
+              id(in_call) = false;
+              if (id(acted)) id(need_quiet) = true;
+              id(incoming_call).publish_state(false);
+              id(on_call_end).execute();
+            }
+          }
+
+switch: []
+
+event:
+  - platform: template
+    id: domofon_event
+    name: "Event"
+    icon: mdi:doorbell
+    event_types: [ring, opened, rejected, missed, busy, manual, released]
+
+select:
+  - platform: template
+    id: panel_profile
+    name: "Panel type"
+    icon: mdi:door-sliding-lock
+    entity_category: config
+    options:
+      - Класичний
+      - СтройМастер
+    initial_option: Класичний
+    optimistic: true
+    restore_value: true
+  - platform: template
+    id: mode
+    name: "Mode"
+    icon: mdi:door
+    options:
+      - Звичайний
+      - Відчинити один раз
+      - Завжди відчиняти
+      - Завжди скидати
+    initial_option: Звичайний
+    optimistic: true
+    restore_value: true
+    on_value:
+      - script.execute: { id: log_event, type: manual, text: !lambda 'return "Режим: " + x;' }
+      - script.execute: update_leds
+
+number:
+  - platform: template
+    id: min_signal_ms
+    name: "Min signal"
+    icon: mdi:timer-outline
+    unit_of_measurement: ms
+    min_value: 50
+    max_value: 3000
+    step: 50
+    initial_value: 300
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: call_end_s
+    name: "Call end silence"
+    icon: mdi:timer-sand
+    unit_of_measurement: s
+    min_value: 1
+    max_value: 20
+    step: 0.5
+    initial_value: 6
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: lockout_s
+    name: "Lockout after action"
+    icon: mdi:lock-clock
+    unit_of_measurement: s
+    min_value: 0
+    max_value: 30
+    step: 1
+    initial_value: 8
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: answer_ms
+    name: "Answer delay"
+    icon: mdi:phone-in-talk
+    unit_of_measurement: ms
+    min_value: 100
+    max_value: 5000
+    step: 100
+    initial_value: 1500
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: release_gap_ms
+    name: "Release gap"
+    icon: mdi:timer-pause-outline
+    unit_of_measurement: ms
+    min_value: 200
+    max_value: 10000
+    step: 100
+    initial_value: 2000
+    optimistic: true
+    restore_value: true
+    entity_category: config
+  - platform: template
+    id: open_ms
+    name: "Open pulse"
+    icon: mdi:door-open
+    unit_of_measurement: ms
+    min_value: 100
+    max_value: 3000
+    step: 100
+    initial_value: 600
+    optimistic: true
+    restore_value: true
+    entity_category: config
+
+button:
+  - platform: template
+    name: "Open"
+    icon: mdi:door-open
+    on_press:
+      - script.execute: request_accept
+  - platform: template
+    name: "Reject"
+    icon: mdi:phone-hangup
+    on_press:
+      - script.execute: request_reject
+  - platform: template
+    name: "Release line"
+    icon: mdi:phone-return
+    on_press:
+      - if:
+          condition:
+            lambda: "return !(id(seq_accept).is_running() || id(seq_release).is_running());"
+          then:
+            - script.execute: seq_release
+  - platform: restart
+    name: "Restart"
+    entity_category: diagnostic
+
+text_sensor:
+  - platform: template
+    id: last_event
+    name: "Last event"
+    icon: mdi:history
+  - platform: debug
+    reset_reason:
+      name: "Reset reason"
+  - platform: wifi_info
+    ip_address:
+      name: "IP"
+
+sensor:
+  - platform: template
+    id: last_call_duration
+    name: "Last call duration"
+    unit_of_measurement: s
+    accuracy_decimals: 1
+    icon: mdi:timer
+  - platform: template
+    id: last_call_bursts
+    name: "Last call bursts"
+    accuracy_decimals: 0
+    icon: mdi:pulse
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 60s
+  - platform: wifi_signal
+    name: "WiFi signal"
+    update_interval: 60s
+
+# RGB-світлодіод (як в оригіналі; статусний LED на D4 прибрано — конфліктував із синім каналом)
+light:
+  - platform: rgb
+    id: rgb_led
+    name: "Domofon led"
+    internal: true
+    restore_mode: ALWAYS_OFF
+    red: led_red
+    green: led_green
+    blue: led_blue
+    effects:
+      - automation:
+          name: "Blink Green"
+          sequence:
+            - light.turn_on: { id: rgb_led, brightness: 50%, red: 0%, green: 100%, blue: 0%, transition_length: 100ms }
+            - delay: 200ms
+            - light.turn_on: { id: rgb_led, brightness: 1%, red: 0%, green: 100%, blue: 0%, transition_length: 100ms }
+            - delay: 3000ms
+      - automation:
+          name: "Blink Red"
+          sequence:
+            - light.turn_on: { id: rgb_led, brightness: 100%, red: 100%, green: 0%, blue: 0%, transition_length: 100ms }
+            - delay: 500ms
+            - light.turn_on: { id: rgb_led, brightness: 1%, red: 100%, green: 0%, blue: 0%, transition_length: 100ms }
+            - delay: 500ms
+
+output:
+  - { platform: esp8266_pwm, id: led_red, pin: { number: $pin_led_red, mode: OUTPUT } }
+  - { platform: esp8266_pwm, id: led_green, pin: { number: $pin_led_green, mode: OUTPUT } }
+  - { platform: esp8266_pwm, id: led_blue, pin: { number: $pin_led_blue, mode: OUTPUT } }
+  - platform: gpio
+    id: relay_answer
+    pin: { number: $pin_relay_answer, mode: OUTPUT, inverted: $relays_inverted }
+  - platform: gpio
+    id: relay_open
+    pin: { number: $pin_relay_open, mode: OUTPUT, inverted: $relays_inverted }
+
+binary_sensor:
+  # Сирий сигнал з оптопари. Посилки дзвінка зливаються в один «сигнал» (пауза < 150 мс).
+  - platform: gpio
+    id: line_signal
+    name: "Line signal"
+    icon: mdi:sine-wave
+    entity_category: diagnostic
+    pin: { number: $pin_call_detect, mode: INPUT_PULLUP, inverted: true }
+    filters:
+      - delayed_off: 150ms
+    on_press:
+      - lambda: |-
+          id(raw_since) = millis();
+          if (id(in_call)) id(bursts)++; else id(bursts) = 1;
+          ESP_LOGD("line", "сигнал ↑");
+    on_release:
+      - lambda: |-
+          ESP_LOGD("line", "сигнал ↓ (%u мс)", (unsigned) (millis() - id(raw_since)));
+          id(raw_since) = 0;
+
+  # Дзвінок (визначається логікою вище, а не напряму з піна)
+  - platform: template
+    id: incoming_call
+    name: "Incoming call"
+    icon: mdi:bell-ring
+
+  # Фізична кнопка: коротко — «відчинити один раз» вкл/вимк (під час дзвінка — відчинити),
+  # довго — режим «Звичайний» (під час дзвінка — скинути).
+  - platform: gpio
+    id: hw_button
+    name: "Button"
+    entity_category: diagnostic
+    pin: { number: $pin_btn_accept, mode: INPUT_PULLUP, inverted: true }
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_multi_click:
+      - timing:
+          - ON for 50ms to 1s
+          - OFF for at least 300ms
+        then:
+          - if:
+              condition:
+                lambda: "return id(in_call);"
+              then:
+                - script.execute: request_accept
+              else:
+                - lambda: |-
+                    auto call = id(mode).make_call();
+                    call.set_option(id(mode).current_option().str() == "Відчинити один раз" ? "Звичайний" : "Відчинити один раз");
+                    call.perform();
+      - timing:
+          - ON for at least 1s
+        then:
+          - if:
+              condition:
+                lambda: "return id(in_call);"
+              then:
+                - script.execute: request_reject
+              else:
+                - select.set: { id: mode, option: "Звичайний" }

@@ -1,0 +1,114 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Домофон",
+        "description": "Оберіть ESPHome-пристрій домофона (прошивка smart-domofon з цього репозиторію).",
+        "data": {
+          "device_id": "Пристрій"
+        }
+      }
+    },
+    "error": {
+      "missing_entities": "На пристрої немає потрібних сутностей: {missing}. Перевірте прошивку."
+    },
+    "abort": {
+      "already_configured": "Цей домофон уже додано"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Сповіщення",
+        "data": {
+          "notify_services": "Кому надсилати (notify.mobile_app_…)",
+          "actionable": "Кнопки «Відчинити» / «Скинути» у сповіщенні",
+          "require_auth": "Вимагати Face ID для «Відчинити»",
+          "notify_outcome": "Повідомляти результат (відчинено / скинуто / пропущено)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "calls_today": {
+        "name": "Дзвінків сьогодні"
+      },
+      "last_call": {
+        "name": "Останній дзвінок",
+        "state_attributes": {
+          "outcome": {
+            "name": "Результат",
+            "state": {
+              "ringing": "Дзвонить",
+              "opened": "Відчинено",
+              "rejected": "Скинуто",
+              "missed": "Пропущено"
+            }
+          }
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "entry_required": {
+      "message": "Вкажіть config_entry_id: налаштовано кілька домофонів (або жодного)."
+    }
+  },
+  "selector": {
+    "mode": {
+      "options": {
+        "normal": "Звичайний",
+        "open_once": "Відчинити один раз",
+        "always_open": "Завжди відчиняти",
+        "always_reject": "Завжди скидати"
+      }
+    }
+  },
+  "services": {
+    "open": {
+      "name": "Відчинити",
+      "description": "Відповісти й відчинити двері.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Домофон",
+          "description": "Потрібно, якщо домофонів кілька."
+        }
+      }
+    },
+    "reject": {
+      "name": "Скинути",
+      "description": "Скинути поточний виклик.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Домофон",
+          "description": "Потрібно, якщо домофонів кілька."
+        }
+      }
+    },
+    "release": {
+      "name": "Відпустити лінію",
+      "description": "Зняти й покласти трубку, якщо панель «зависла». Під час дзвінка може відчинити двері.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Домофон",
+          "description": "Потрібно, якщо домофонів кілька."
+        }
+      }
+    },
+    "set_mode": {
+      "name": "Режим",
+      "description": "Змінити режим домофона.",
+      "fields": {
+        "config_entry_id": {
+          "name": "Домофон",
+          "description": "Потрібно, якщо домофонів кілька."
+        },
+        "mode": {
+          "name": "Режим",
+          "description": "Новий режим."
+        }
+      }
+    }
+  }
+}

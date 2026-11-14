@@ -1,0 +1,30 @@
+open:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: domofon
+reject:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: domofon
+release:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: domofon
+set_mode:
+  fields:
+    config_entry_id:
+      selector:
+        config_entry:
+          integration: domofon
+    mode:
+      required: true
+      selector:
+        select:
+          translation_key: mode
+          options: [normal, open_once, always_open, always_reject]
