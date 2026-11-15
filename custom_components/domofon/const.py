@@ -11,12 +11,18 @@ CONF_NOTIFY: Final = "notify_services"
 CONF_ACTIONABLE: Final = "actionable"
 CONF_REQUIRE_AUTH: Final = "require_auth"
 CONF_NOTIFY_OUTCOME: Final = "notify_outcome"
+CONF_REJECT_BUTTON: Final = "reject_button"
+CONF_NOTIFY_AUTO: Final = "notify_auto"
+CONF_TELEGRAM: Final = "telegram_targets"
 
 DEFAULT_OPTIONS: Final = {
     CONF_NOTIFY: [],
     CONF_ACTIONABLE: True,
     CONF_REQUIRE_AUTH: True,
-    CONF_NOTIFY_OUTCOME: True,
+    CONF_NOTIFY_OUTCOME: False,
+    CONF_REJECT_BUTTON: False,
+    CONF_NOTIFY_AUTO: True,
+    CONF_TELEGRAM: [],
 }
 
 # role -> (entity domain, ESPHome entity name). The firmware in esphome/ uses these names.
@@ -36,6 +42,8 @@ MODES: Final = ("normal", "open_once", "always_open", "always_reject")
 
 ACTION_OPEN: Final = "DOMOFON_OPEN"
 ACTION_REJECT: Final = "DOMOFON_REJECT"
+# Telegram inline button callback data (+ "_<entry_id>", ≤ 64 bytes)
+TG_OPEN: Final = "/domofon_open"
 
 # A notification action is accepted only this long after the ring (seconds).
 ACTION_WINDOW_S: Final = 90

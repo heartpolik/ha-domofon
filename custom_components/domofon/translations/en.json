@@ -22,9 +22,15 @@
         "title": "Notifications",
         "data": {
           "notify_services": "Notify services (notify.mobile_app_…)",
-          "actionable": "“Open” / “Reject” buttons in the notification",
+          "actionable": "“Open” button in the phone notification",
           "require_auth": "Require Face ID / unlock for “Open”",
-          "notify_outcome": "Notify the outcome (opened / rejected / missed)"
+          "notify_outcome": "Separate notification with the outcome (opened / rejected / missed)",
+          "reject_button": "Also show a “Reject” button",
+          "notify_auto": "Notify about calls in automatic modes (open / reject)",
+          "telegram_targets": "Telegram chats (telegram_bot notify entities)"
+        },
+        "data_description": {
+          "telegram_targets": "The message gets an “Open” button; when the call ends it is edited in place (no extra notification). Anyone in these chats can open the door."
         }
       }
     }

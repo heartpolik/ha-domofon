@@ -14,8 +14,11 @@ from .const import (
     CONF_ACTIONABLE,
     CONF_DEVICE_ID,
     CONF_NOTIFY,
+    CONF_NOTIFY_AUTO,
     CONF_NOTIFY_OUTCOME,
+    CONF_REJECT_BUTTON,
     CONF_REQUIRE_AUTH,
+    CONF_TELEGRAM,
     DEFAULT_OPTIONS,
     DOMAIN,
 )
@@ -82,7 +85,12 @@ class DomofonOptionsFlow(OptionsFlow):
                 ),
                 vol.Optional(CONF_ACTIONABLE, default=opts[CONF_ACTIONABLE]): selector.BooleanSelector(),
                 vol.Optional(CONF_REQUIRE_AUTH, default=opts[CONF_REQUIRE_AUTH]): selector.BooleanSelector(),
+                vol.Optional(CONF_REJECT_BUTTON, default=opts[CONF_REJECT_BUTTON]): selector.BooleanSelector(),
+                vol.Optional(CONF_NOTIFY_AUTO, default=opts[CONF_NOTIFY_AUTO]): selector.BooleanSelector(),
                 vol.Optional(CONF_NOTIFY_OUTCOME, default=opts[CONF_NOTIFY_OUTCOME]): selector.BooleanSelector(),
+                vol.Optional(CONF_TELEGRAM, default=opts[CONF_TELEGRAM]): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="notify", integration="telegram_bot", multiple=True)
+                ),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)
